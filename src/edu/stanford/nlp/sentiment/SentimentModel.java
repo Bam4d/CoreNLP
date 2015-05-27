@@ -90,12 +90,12 @@ public class SentimentModel implements Serializable {
    */
   final Random rand;
 
-  static final String UNKNOWN_WORD = "*UNK*";
+  static final String UNKNOWN_WORD = "UNK";
 
   /**
    * Will store various options specific to this model
    */
-  final RNNOptions op;
+  public final RNNOptions op;
 
   /*
   // An example of how you could read in old models with readObject to fix the serialization

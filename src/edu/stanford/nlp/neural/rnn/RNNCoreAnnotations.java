@@ -87,7 +87,7 @@ public class RNNCoreAnnotations {
     }
   }
 
-  public static int getGoldClass(Tree tree) {
+  public static Integer getGoldClass(Tree tree) {
     Label label = tree.label();
     if (!(label instanceof CoreLabel)) {
       throw new IllegalArgumentException("CoreLabels required to get the attached gold class");

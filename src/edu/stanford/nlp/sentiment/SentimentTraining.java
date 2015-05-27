@@ -17,7 +17,7 @@ public class SentimentTraining {
   private static final NumberFormat NF = new DecimalFormat("0.00");
   private static final NumberFormat FILENAME = new DecimalFormat("0000");
 
-  public static void executeOneTrainingBatch(SentimentModel model, List<Tree> trainingBatch, double[] sumGradSquare) {
+  public static void executeOneTrainingBatch(SentimentModel model, List<? extends Tree> trainingBatch, double[] sumGradSquare) {
     SentimentCostAndGradient gcFunc = new SentimentCostAndGradient(model, trainingBatch);
     double[] theta = model.paramsToVector();
 

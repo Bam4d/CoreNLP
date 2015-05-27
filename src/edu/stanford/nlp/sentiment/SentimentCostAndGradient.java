@@ -1,8 +1,14 @@
 package edu.stanford.nlp.sentiment;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.ejml.simple.SimpleMatrix;
 
@@ -19,9 +25,11 @@ import edu.stanford.nlp.util.TwoDimensionalMap;
 public class SentimentCostAndGradient extends AbstractCachingDiffFunction {
 
   private final SentimentModel model;
-  private final List<Tree> trainingBatch;
+  private final List<? extends Tree> trainingBatch;
+  
+  private final ExecutorService executors = Executors.newCachedThreadPool();
 
-  public SentimentCostAndGradient(SentimentModel model, List<Tree> trainingBatch) {
+  public SentimentCostAndGradient(SentimentModel model, List<? extends Tree> trainingBatch) {
     this.model = model;
     this.trainingBatch = trainingBatch;
   }
@@ -78,10 +86,10 @@ public class SentimentCostAndGradient extends AbstractCachingDiffFunction {
     TwoDimensionalMap<String, String, SimpleMatrix> binaryCD = TwoDimensionalMap.treeMap();
 
     // unaryCD stands for Classification Derivatives
-    Map<String, SimpleMatrix> unaryCD = Generics.newTreeMap();
+    Map<String, SimpleMatrix> unaryCD = new ConcurrentSkipListMap<>();
 
     // word vector derivatives
-    Map<String, SimpleMatrix> wordVectorD = Generics.newTreeMap();
+    Map<String, SimpleMatrix> wordVectorD = new ConcurrentSkipListMap<>();
 
     for (TwoDimensionalMap.Entry<String, String, SimpleMatrix> entry : model.binaryTransform) {
       int numRows = entry.getValue().numRows();
@@ -118,21 +126,58 @@ public class SentimentCostAndGradient extends AbstractCachingDiffFunction {
     // wordVectorD will be filled on an as-needed basis
 
     // TODO: This part can easily be parallelized
-    List<Tree> forwardPropTrees = Generics.newArrayList();
-    for (Tree tree : trainingBatch) {
-      Tree trainingTree = tree.deepCopy();
-      // this will attach the error vectors and the node vectors
-      // to each node in the tree
-      forwardPropagateTree(trainingTree);
-      forwardPropTrees.add(trainingTree);
-    }
+    //List<Tree> forwardPropTrees = Generics.newArrayList();
+    List<Future<Double>> trainingFuture = new ArrayList<>();
+    final AtomicInteger correct = new AtomicInteger();
+    for (final Tree tree : trainingBatch) {
+    	trainingFuture.add(executors.submit(new Callable<Double>() {
 
-    // TODO: we may find a big speedup by separating the derivatives and then summing
-    double error = 0.0;
-    for (Tree tree : forwardPropTrees) {
-      backpropDerivativesAndError(tree, binaryTD, binaryCD, binaryTensorTD, unaryCD, wordVectorD);
-      error += sumError(tree);
+			@Override
+			public Double call() throws Exception {
+				Tree trainingTree = tree.deepCopy();
+				// this will attach the error vectors and the node vectors
+				// to each node in the tree
+				forwardPropagateTree(trainingTree);
+				int correctClass = RNNCoreAnnotations.getGoldClass(trainingTree);
+				System.out.println(correctClass+": "+RNNCoreAnnotations.getPredictions(trainingTree).get(correctClass));
+				if(RNNCoreAnnotations.getPredictedClass(trainingTree) == correctClass) correct.incrementAndGet();
+				
+				backpropDerivativesAndError(trainingTree, binaryTD, binaryCD, binaryTensorTD, unaryCD, wordVectorD);
+				
+				return sumError(trainingTree);
+			}
+    	
+    	}));
+    	
     }
+    
+    Double error = 0.0;
+    
+    
+	    for (Future<Double> future : trainingFuture) {
+	    	try {
+	    		error += future.get();
+	    	} catch(Exception e) {
+	        	System.out.println("Could not process example, ignoring.");
+	        }
+	    }
+    
+    
+    System.out.println("correct: "+correct.get()+"/"+trainingBatch.size());
+    	
+//      Tree trainingTree = tree.deepCopy();
+//      // this will attach the error vectors and the node vectors
+//      // to each node in the tree
+//      forwardPropagateTree(trainingTree);
+//      forwardPropTrees.add(trainingTree);
+//    }
+//
+//    // TODO: we may find a big speedup by separating the derivatives and then summing
+//    double error = 0.0;
+//    for (Tree tree : forwardPropTrees) {
+//      backpropDerivativesAndError(tree, binaryTD, binaryCD, binaryTensorTD, unaryCD, wordVectorD);
+//      error += sumError(tree);
+//    }
 
     // scale the error by the number of sentences so that the
     // regularization isn't drowned out for large training batchs
@@ -232,20 +277,22 @@ public class SentimentCostAndGradient extends AbstractCachingDiffFunction {
 
     // Build a vector that looks like 0,0,1,0,0 with an indicator for the correct class
     SimpleMatrix goldLabel = new SimpleMatrix(model.numClasses, 1);
-    int goldClass = RNNCoreAnnotations.getGoldClass(tree);
-    if (goldClass >= 0) {
+    Integer goldClass = RNNCoreAnnotations.getGoldClass(tree);
+    double nodeWeight = 0;
+    if (goldClass!=null) {
       goldLabel.set(goldClass, 1.0);
+      nodeWeight = model.op.trainOptions.getClassWeight(goldClass);
     }
 
-    double nodeWeight = model.op.trainOptions.getClassWeight(goldClass);
 
     SimpleMatrix predictions = RNNCoreAnnotations.getPredictions(tree);
+    //if (goldClass!=null) System.out.println("label: "+goldClass+" predicted "+predictions);
 
     // If this is an unlabeled class, set deltaClass to 0.  We could
     // make this more efficient by eliminating various of the below
     // calculations, but this would be the easiest way to handle the
     // unlabeled class
-    SimpleMatrix deltaClass = goldClass >= 0 ? predictions.minus(goldLabel).scale(nodeWeight) : new SimpleMatrix(predictions.numRows(), predictions.numCols());
+    SimpleMatrix deltaClass = goldClass != null ? predictions.minus(goldLabel).scale(nodeWeight) : new SimpleMatrix(predictions.numRows(), predictions.numCols());
     SimpleMatrix localCD = deltaClass.mult(NeuralUtils.concatenateWithBias(currentVector).transpose());
 
     double error = -(NeuralUtils.elementwiseApplyLog(predictions).elementMult(goldLabel).elementSum());
@@ -357,8 +404,9 @@ public class SentimentCostAndGradient extends AbstractCachingDiffFunction {
       // degenerate trees of just one leaf)
       throw new AssertionError("We should not have reached leaves in forwardPropagate");
     } else if (tree.isPreTerminal()) {
-      classification = model.getUnaryClassification(tree.label().value());
+      classification = model.getUnaryClassification(tree.firstChild().label().value());
       String word = tree.children()[0].label().value();
+      //System.out.println("propagating pre-terminal:" + word);
       SimpleMatrix wordVector = model.getWordVector(word);
       nodeVector = NeuralUtils.elementwiseApplyTanh(wordVector);
     } else if (tree.children().length == 1) {
@@ -367,8 +415,8 @@ public class SentimentCostAndGradient extends AbstractCachingDiffFunction {
       forwardPropagateTree(tree.children()[0]);
       forwardPropagateTree(tree.children()[1]);
 
-      String leftCategory = tree.children()[0].label().value();
-      String rightCategory = tree.children()[1].label().value();
+      String leftCategory = "";//tree.children()[0].label().value();
+      String rightCategory = "";//tree.children()[1].label().value();
       SimpleMatrix W = model.getBinaryTransform(leftCategory, rightCategory);
       classification = model.getBinaryClassification(leftCategory, rightCategory);
 
