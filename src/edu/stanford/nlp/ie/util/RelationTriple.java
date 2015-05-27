@@ -284,5 +284,4 @@ public class RelationTriple implements Comparable<RelationTriple>, Iterable<Core
       return Optional.of(sourceTree);
     }
   }
-
 }
